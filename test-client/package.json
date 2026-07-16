@@ -1,0 +1,16 @@
+{
+  "name": "chathsbc-test-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --env-file=.env dev.js",
+    "dev:api": "node --env-file=.env server.js",
+    "dev:ui": "vite --host 127.0.0.1 --port 5173",
+    "check": "node check.js"
+  },
+  "dependencies": {
+    "dompurify": "^3.4.12",
+    "marked": "^18.0.6"
+  }
+}
