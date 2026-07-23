@@ -3,16 +3,23 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>ChatHSBC MCP Test Client</title>
+    <title>ChatHSBC</title>
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
     <main class="app-shell">
-      <section class="workspace" aria-label="Mortgage chat workspace">
+      <nav class="navigation-rail" aria-label="Primary navigation">
+        <a class="brand-mark" href="/" aria-label="ChatHSBC home">
+          <img src="/assets/chatgpt-logo.png" alt="" />
+        </a>
+        <button class="nav-button is-active" type="button" aria-label="New chat">✎</button>
+        <button class="nav-button" type="button" aria-label="Search" disabled>⌕</button>
+      </nav>
+
+      <section class="workspace" aria-label="Chat workspace">
         <header class="topbar">
-          <div>
-            <p class="eyebrow">ChatHSBC MCP</p>
-            <h1>Mortgage Test Chat</h1>
+          <div class="mode-switch" aria-label="Chat mode">
+            <span class="is-selected">Chat</span><span>Work</span>
           </div>
           <div class="connection">
             <label for="endpoint">Endpoint</label>
@@ -35,7 +42,7 @@
                 aria-multiline="false"
                 autocomplete="off"
                 aria-label="Chat message"
-                data-placeholder="Ask about a mortgage, or type @ to add HSBC Mortgages"
+                data-placeholder="Message ChatHSBC, or type @ to add HSBC Mortgages"
                 ></div>
                 <div id="mention-menu" class="mention-menu" role="listbox" aria-label="Available apps" hidden>
                   <button id="hsbc-mention-option" type="button" class="mention-option" role="option" aria-selected="false">
@@ -44,37 +51,11 @@
                   </button>
                 </div>
               </div>
-              <button id="sample-button" type="button">Sample</button>
-              <button type="submit">Send</button>
+              <button class="send-button" type="submit" aria-label="Send message">↑</button>
             </form>
           </section>
 
-          <aside class="side-panel" aria-label="Mortgage inputs and MCP details">
-            <section class="panel-section">
-              <div class="section-heading">
-                <h2>Mortgage Details</h2>
-                <button id="calculate-button" type="button">Run Tool</button>
-              </div>
-              <form id="mortgage-form" class="field-grid">
-                <label>
-                  <span>Loan Amount</span>
-                  <input id="loan-amount" name="loanAmount" type="number" min="1" step="1000" value="250000" />
-                </label>
-                <label>
-                  <span>Rate Percent</span>
-                  <input id="interest-rate" name="annualInterestRatePercent" type="number" min="0" step="0.01" value="5" />
-                </label>
-                <label>
-                  <span>Term Years</span>
-                  <input id="term-years" name="termYears" type="number" min="1" step="1" value="25" />
-                </label>
-                <label>
-                  <span>Overpayment</span>
-                  <input id="monthly-overpayment" name="monthlyOverpayment" type="number" min="0" step="25" value="200" />
-                </label>
-              </form>
-            </section>
-
+          <aside class="side-panel" aria-label="MCP details">
             <section class="panel-section">
               <div class="section-heading">
                 <h2>Connection</h2>

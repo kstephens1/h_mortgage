@@ -5,6 +5,8 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import {
   calculateMortgageRepayment,
+  findIllustrativeMortgageProducts,
+  MORTGAGE_NEEDS,
   type MortgageCalculationResult,
 } from "./mortgage.js";
 
@@ -66,7 +68,19 @@ const productRateInputSchema = {
   depositAmount: z
     .number()
     .positive()
+    .optional()
     .describe("Deposit or equity contribution in pounds sterling."),
+  termYears: z
+    .number()
+    .int()
+    .min(2)
+    .max(40)
+    .default(25)
+    .describe("Mortgage term in whole years. Defaults to 25 for compatibility."),
+  mortgageNeed: z
+    .enum(MORTGAGE_NEEDS)
+    .default("switch_residential")
+    .describe("Mortgage journey context. Uses the same illustrative rate algorithm for every journey."),
 };
 
 const productRateOutputSchema = {
@@ -74,52 +88,55 @@ const productRateOutputSchema = {
   loanAmount: z.number().positive(),
   propertyValue: z.number().positive(),
   depositAmount: z.number().positive(),
+  termYears: z.number().int().min(2).max(40),
   loanToValuePercent: z.number().positive(),
+  maximumLoanToValuePercent: z.number().positive(),
+  mortgageNeed: z.enum(MORTGAGE_NEEDS),
   products: z.array(
     z.object({
+      id: z.string(),
       name: z.string(),
+      rateType: z.enum(["fixed", "tracker"]),
       initialRatePercent: z.number().positive(),
-      fixedPeriodYears: z.number().int().positive(),
+      initialPeriodYears: z.number().int().positive(),
       productFee: z.number().nonnegative(),
       maximumLoanToValuePercent: z.number().positive(),
+      monthlyPayment: z.number().positive(),
+      annualPercentageRatePercent: z.number().positive(),
+      reversionRatePercent: z.number().positive(),
+      features: z.array(z.string()),
     }),
   ),
   disclaimer: z.string(),
 };
 
-const productRateFixtures = [
-  {
-    name: "HSBC-style 2 Year Fixed - 90% LTV",
-    initialRatePercent: 5.79,
-    fixedPeriodYears: 2,
-    productFee: 999,
-    maximumLoanToValuePercent: 90,
-  },
-  {
-    name: "HSBC-style 5 Year Fixed - 90% LTV",
-    initialRatePercent: 5.49,
-    fixedPeriodYears: 5,
-    productFee: 999,
-    maximumLoanToValuePercent: 90,
-  },
-  {
-    name: "HSBC-style 2 Year Fixed - 80% LTV",
-    initialRatePercent: 5.19,
-    fixedPeriodYears: 2,
-    productFee: 999,
-    maximumLoanToValuePercent: 80,
-  },
-  {
-    name: "HSBC-style 5 Year Fixed - 60% LTV",
-    initialRatePercent: 4.89,
-    fixedPeriodYears: 5,
-    productFee: 999,
-    maximumLoanToValuePercent: 60,
-  },
-];
+const customerSupportInputSchema = {
+  topic: z
+    .enum(["general", "mortgage"])
+    .default("general")
+    .describe("Use mortgage for a mortgage-specific support request; otherwise use general."),
+};
 
-const PRODUCT_RATE_DISCLAIMER =
-  "Illustrative local fixture rates only. They are not live HSBC rates, eligibility decisions, or a product offer.";
+const customerSupportOutputSchema = {
+  topic: z.enum(["general", "mortgage"]),
+  contactPageUrl: z.string().url(),
+  contactPageLabel: z.string(),
+  phoneLines: z.array(
+    z.object({
+      label: z.string(),
+      number: z.string(),
+      openingHours: z.string(),
+    }),
+  ),
+  onlineOptions: z.array(
+    z.object({
+      label: z.string(),
+      url: z.string().url(),
+      instructions: z.string(),
+    }),
+  ),
+  disclaimer: z.string(),
+};
 
 export function createMortgageServer(): McpServer {
   const server = new McpServer({
@@ -157,7 +174,7 @@ export function createMortgageServer(): McpServer {
     {
       title: "Find illustrative mortgage product rates",
       description:
-        "Returns illustrative local mortgage product-rate fixtures matched by loan-to-value. This is not a live product feed or an eligibility assessment.",
+        "Generates illustrative local fixed and tracker mortgage products from the loan-to-value and mortgage term. Returns monthly repayments, product fees, initial rates, estimated APRC, and reversion rates. This is not a live product feed or an eligibility assessment.",
       inputSchema: productRateInputSchema,
       outputSchema: productRateOutputSchema,
       annotations: {
@@ -168,56 +185,128 @@ export function createMortgageServer(): McpServer {
       },
     },
     async (args) => {
-      if (Math.abs(args.loanAmount + args.depositAmount - args.propertyValue) > 0.01) {
+      try {
+        const result = findIllustrativeMortgageProducts(args);
+
         return {
-          isError: true,
+          structuredContent: result,
           content: [
             {
               type: "text",
-              text: "loanAmount plus depositAmount must equal propertyValue.",
+              text: `${result.products.length} illustrative products generated for ${result.loanToValuePercent}% LTV over ${result.termYears} years. ${result.disclaimer}`,
             },
           ],
         };
-      }
-
-      const loanToValuePercent = (args.loanAmount / args.propertyValue) * 100;
-      const products = productRateFixtures.filter(
-        (product) => loanToValuePercent <= product.maximumLoanToValuePercent,
-      );
-
-      if (products.length === 0) {
+      } catch (error) {
         return {
           isError: true,
-          content: [
-            {
-              type: "text",
-              text: "No illustrative fixture products are available above 90% LTV.",
-            },
-          ],
+          content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
         };
       }
+    },
+  );
 
-      const result = {
-        currency: "GBP" as const,
-        ...args,
-        loanToValuePercent: Number(loanToValuePercent.toFixed(2)),
-        products,
-        disclaimer: PRODUCT_RATE_DISCLAIMER,
-      };
-
+  server.registerTool(
+    "get_customer_support",
+    {
+      title: "Get HSBC customer support contact options",
+      description:
+        "Returns local, official-source-linked HSBC UK general or mortgage customer-support contact options. Use this when the customer asks for help or asks how to contact HSBC. Contact details are a snapshot; the linked official page is the source of truth.",
+      inputSchema: customerSupportInputSchema,
+      outputSchema: customerSupportOutputSchema,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false,
+        idempotentHint: true,
+      },
+    },
+    async ({ topic }) => {
+      const result = getCustomerSupport(topic);
       return {
         structuredContent: result,
-        content: [
-          {
-            type: "text",
-            text: `${products.map((product) => `${product.name}: ${product.initialRatePercent}% for ${product.fixedPeriodYears} years, fee ${formatPounds(product.productFee)}.`).join(" ")} ${PRODUCT_RATE_DISCLAIMER}`,
-          },
-        ],
+        content: [{ type: "text", text: formatCustomerSupportResult(result) }],
       };
     },
   );
 
   return server;
+}
+
+function getCustomerSupport(topic: "general" | "mortgage") {
+  if (topic === "mortgage") {
+    return {
+      topic,
+      contactPageUrl: "https://servicing.hsbc.co.uk/mortgages/guidance/",
+      contactPageLabel: "HSBC mortgage support",
+      phoneLines: [
+        {
+          label: "Mortgage support (UK)",
+          number: "0800 169 6333",
+          openingHours: "Monday to Friday 08:00–20:00; Saturday and Sunday 09:00–17:00 (UK time).",
+        },
+      ],
+      onlineOptions: [
+        {
+          label: "HSBC Contact and online chat",
+          url: "https://www.hsbc.co.uk/contact/",
+          instructions: "See HSBC's contact options and instructions for starting chat in online or mobile banking.",
+        },
+        {
+          label: "HSBC Online Banking",
+          url: "https://www.hsbc.co.uk/ways-to-bank/online-banking/",
+          instructions: "Log on, then select Chat on the right-hand side of online banking.",
+        },
+      ],
+      disclaimer: "Contact details are an official-source snapshot. Check the linked HSBC page for the latest options and opening hours.",
+    };
+  }
+
+  return {
+    topic,
+    contactPageUrl: "https://www.hsbc.co.uk/contact/",
+    contactPageLabel: "HSBC Contact us",
+    phoneLines: [
+      {
+        label: "Existing customers (UK)",
+        number: "03457 404 404",
+        openingHours: "08:00–20:00 every day.",
+      },
+      {
+        label: "Existing customers (outside the UK)",
+        number: "+44 1226 261 010",
+        openingHours: "08:00–20:00 every day (UK time).",
+      },
+      {
+        label: "Non-HSBC customers (UK)",
+        number: "03455 873 444",
+        openingHours: "See the official contact page for current opening hours.",
+      },
+      {
+        label: "Existing Premier customers (UK)",
+        number: "03457 707 070",
+        openingHours: "Open 24 hours a day, 7 days a week.",
+      },
+      {
+        label: "Existing Premier customers (outside the UK)",
+        number: "+44 1226 260 260",
+        openingHours: "Open 24 hours a day, 7 days a week.",
+      },
+    ],
+    onlineOptions: [
+      {
+        label: "HSBC Contact and online chat",
+        url: "https://www.hsbc.co.uk/contact/",
+        instructions: "See HSBC's contact options and instructions for starting chat in online or mobile banking.",
+      },
+      {
+        label: "HSBC Online Banking",
+        url: "https://www.hsbc.co.uk/ways-to-bank/online-banking/",
+        instructions: "Log on, then select Chat on the right-hand side of online banking.",
+      },
+    ],
+    disclaimer: "Contact details are an official-source snapshot. Check the linked HSBC page for the latest options and opening hours.",
+  };
 }
 
 export function startHttpServer(
@@ -292,19 +381,44 @@ function writeCorsHeaders(res: ServerResponse): void {
 
 function formatMortgageResult(result: MortgageCalculationResult): string {
   const lines = [
-    `Estimated monthly payment: ${formatPounds(result.monthlyPayment)}.`,
-    `Total paid over ${result.termYears} years: ${formatPounds(result.totalPaid)}.`,
-    `Total interest: ${formatPounds(result.totalInterest)}.`,
+    "## Repayment estimate",
+    "",
+    `- **Loan amount:** ${formatPounds(result.loanAmount)}`,
+    `- **Annual interest rate:** ${result.annualInterestRatePercent.toFixed(2)}%`,
+    `- **Term:** ${result.termYears} years`,
+    `- **Monthly overpayment:** ${formatPounds(result.monthlyOverpayment)}`,
+    `- **Standard monthly repayment:** ${formatPounds(result.monthlyPayment)}`,
+    `- **Standard total interest payable:** ${formatPounds(result.totalInterest)}`,
   ];
 
   if (result.overpaymentImpact) {
     lines.push(
-      `With a ${formatPounds(result.monthlyOverpayment)} monthly overpayment, the estimated payoff is ${result.overpaymentImpact.payoffMonths} months, saving ${result.overpaymentImpact.timeSavedMonths} months and ${formatPounds(result.overpaymentImpact.interestSaved)} interest.`,
+      `- **Monthly payment including overpayment:** ${formatPounds(result.monthlyPaymentWithOverpayment)}`,
+      `- **Total interest payable with overpayment:** ${formatPounds(result.overpaymentImpact.totalInterestWithOverpayment)}`,
+      `- **Interest saved:** ${formatPounds(result.overpaymentImpact.interestSaved)}`,
+      `- **Time saved:** ${result.overpaymentImpact.timeSavedMonths} months`,
     );
   }
 
-  lines.push(result.disclaimer);
-  return lines.join(" ");
+  lines.push("", result.disclaimer);
+  return lines.join("\n");
+}
+
+function formatCustomerSupportResult(result: ReturnType<typeof getCustomerSupport>): string {
+  const lines = [
+    `## ${result.contactPageLabel}`,
+    ...result.phoneLines.map(
+      (line) => `- **${line.label}:** ${line.number} — ${line.openingHours}`,
+    ),
+    "",
+    "### Chat and online contact",
+    ...result.onlineOptions.map(
+      (option) => `- [${option.label}](${option.url}) — ${option.instructions}`,
+    ),
+    "",
+    result.disclaimer,
+  ];
+  return lines.join("\n");
 }
 
 function formatPounds(value: number): string {

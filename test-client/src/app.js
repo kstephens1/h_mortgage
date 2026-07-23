@@ -3,6 +3,7 @@ import { marked } from "marked";
 
 const MCP_PROTOCOL_VERSION = "2025-06-18";
 const TOOL_NAME = "calculate_mortgage_repayment";
+const PRODUCT_TOOL_NAME = "find_mortgage_product_rates";
 const HSBC_LOGO_URL = new URL("../assets/hsbc-logo.png", import.meta.url).href;
 
 const elements = {
@@ -14,15 +15,9 @@ const elements = {
   chatLog: document.querySelector("#chat-log"),
   chatForm: document.querySelector("#chat-form"),
   messageInput: document.querySelector("#message-input"),
-  sampleButton: document.querySelector("#sample-button"),
-  calculateButton: document.querySelector("#calculate-button"),
   clearButton: document.querySelector("#clear-button"),
   resultMetrics: document.querySelector("#result-metrics"),
   rawOutput: document.querySelector("#raw-output"),
-  loanAmount: document.querySelector("#loan-amount"),
-  interestRate: document.querySelector("#interest-rate"),
-  termYears: document.querySelector("#term-years"),
-  monthlyOverpayment: document.querySelector("#monthly-overpayment"),
   mentionMenu: document.querySelector("#mention-menu"),
   hsbcMentionOption: document.querySelector("#hsbc-mention-option"),
 };
@@ -34,11 +29,14 @@ const state = {
   tools: [],
   messages: [],
   selectedApp: null,
+  selectedMortgageNeed: null,
+  historyIndex: null,
+  historyDraft: "",
 };
 
 elements.toolName.textContent = TOOL_NAME;
 appendAssistantMessage(
-  "Ready for a conversational mortgage chat. I can use approved local MCP tools for repayment calculations and illustrative product-rate queries.",
+  "Hi! How can I help? Type @ to add HSBC Mortgages when you want mortgage-specific assistance.",
 );
 
 elements.connectButton.addEventListener("click", () => {
@@ -51,23 +49,13 @@ elements.chatForm.addEventListener("submit", (event) => {
   if (!text) return;
 
   clearMessageText();
+  resetHistoryNavigation();
   appendUserMessage(text);
-  applyParsedScenario(text);
   sendChatMessage(text).catch((error) => showError(error));
 });
 
-elements.calculateButton.addEventListener("click", () => {
-  appendUserMessage(formatScenarioText(readMortgageInput()));
-  callMortgageTool().catch((error) => showError(error));
-});
-
-elements.sampleButton.addEventListener("click", () => {
-  const sample = "Can you compare a 250000 mortgage at 5% over 25 years with a 200 monthly overpayment?";
-  setComposerText(sample);
-  elements.messageInput.focus();
-});
-
 elements.messageInput.addEventListener("input", () => {
+  resetHistoryNavigation();
   updateComposerState();
   if (!state.selectedApp && getMessageText().includes("@")) {
     showMentionMenu();
@@ -87,6 +75,18 @@ elements.messageInput.addEventListener("keydown", (event) => {
   }
 
   if (event.key === "Escape") hideMentionMenu();
+
+  if (
+    (event.key === "ArrowUp" || event.key === "ArrowDown") &&
+    !event.shiftKey &&
+    !event.altKey &&
+    !event.ctrlKey &&
+    !event.metaKey &&
+    (state.historyIndex !== null || !getMessageText())
+  ) {
+    const didCycle = cycleMessageHistory(event.key === "ArrowUp" ? -1 : 1);
+    if (didCycle) event.preventDefault();
+  }
 });
 
 elements.hsbcMentionOption.addEventListener("click", selectHsbcMention);
@@ -97,12 +97,14 @@ document.addEventListener("pointerdown", (event) => {
 
 elements.clearButton.addEventListener("click", () => {
   state.messages = [];
+  state.selectedMortgageNeed = null;
+  resetHistoryNavigation();
   elements.chatLog.replaceChildren();
   elements.resultMetrics.textContent = "No result yet";
   elements.resultMetrics.className = "metrics empty-state";
   elements.rawOutput.textContent = "{}";
   appendAssistantMessage(
-    "Chat cleared. The current mortgage details are still available in the form.",
+    "Chat cleared. How can I help? Type @ to add HSBC Mortgages for mortgage-specific assistance.",
   );
 });
 
@@ -110,6 +112,7 @@ async function sendChatMessage(text) {
   state.messages.push({ role: "user", content: text });
   setBusy(true);
   setStatus("running", "Thinking");
+  appendThinkingIndicator();
 
   const response = await fetch("/chat", {
     method: "POST",
@@ -120,6 +123,7 @@ async function sendChatMessage(text) {
       messages: state.messages,
       mcpEndpoint: elements.endpoint.value.trim(),
       hsbcMode: state.selectedApp === "HSBC Mortgages",
+      mortgageNeed: state.selectedMortgageNeed,
     }),
   });
 
@@ -131,11 +135,24 @@ async function sendChatMessage(text) {
   const reply = body.reply ?? "I could not produce a response.";
   state.messages.push({ role: "assistant", content: reply });
   const hsbcResponded = body.source === "mcp" || body.source === "hsbc-guidance";
+  removeThinkingIndicator();
   appendAssistantMessage(reply, { mcpResponded: hsbcResponded });
+  if (body.action?.label && body.action?.url) {
+    appendChatAction(body.action);
+  }
+  if (Array.isArray(body.actions)) {
+    if (body.actions.some((action) => action.kind === "mortgage-need")) {
+      state.selectedMortgageNeed = null;
+    }
+    appendChatActions(body.actions);
+  }
 
   const latestToolResult = body.toolResults?.at(-1)?.result;
   if (latestToolResult) {
     renderResult(latestToolResult, body);
+    if (Array.isArray(latestToolResult.structuredContent?.products)) {
+      appendProductResults(latestToolResult.structuredContent);
+    }
   } else {
     elements.rawOutput.textContent = JSON.stringify(body, null, 2);
   }
@@ -162,9 +179,11 @@ async function connectToServer() {
   state.serverInfo = initResult.serverInfo;
   state.tools = toolsResult.tools ?? [];
 
-  const hasTool = state.tools.some((tool) => tool.name === TOOL_NAME);
-  if (!hasTool) {
-    throw new Error(`Connected, but ${TOOL_NAME} was not returned by tools/list.`);
+  const hasMortgageTools = [TOOL_NAME, PRODUCT_TOOL_NAME].every((toolName) =>
+    state.tools.some((tool) => tool.name === toolName),
+  );
+  if (!hasMortgageTools) {
+    throw new Error("Connected, but the expected mortgage tools were not returned by tools/list.");
   }
 
   elements.serverName.textContent = `${state.serverInfo.name} ${state.serverInfo.version}`;
@@ -172,28 +191,6 @@ async function connectToServer() {
   appendAssistantMessage(
     `Connected to ${state.serverInfo.name}. Direct MCP test calls are available.`,
   );
-  setBusy(false);
-}
-
-async function callMortgageTool() {
-  if (!state.connected) {
-    await connectToServer();
-  }
-
-  const input = readMortgageInput();
-  validateMortgageInput(input);
-  setBusy(true);
-  setStatus("running", "Running");
-
-  const result = await mcpRequest("tools/call", {
-    name: TOOL_NAME,
-    arguments: input,
-  });
-
-  const text = result.content?.find((item) => item.type === "text")?.text;
-  appendAssistantMessage(text ?? "Tool returned a result.", { mcpResponded: true });
-  renderResult(result, { source: "direct-mcp" });
-  setStatus("connected", "Ready");
   setBusy(false);
 }
 
@@ -252,82 +249,6 @@ function parseEventStream(text) {
   throw new Error("MCP stream did not include a JSON-RPC response.");
 }
 
-function applyParsedScenario(text) {
-  const parsed = parseScenario(text);
-  if (parsed.loanAmount !== undefined) elements.loanAmount.value = parsed.loanAmount;
-  if (parsed.annualInterestRatePercent !== undefined) {
-    elements.interestRate.value = parsed.annualInterestRatePercent;
-  }
-  if (parsed.termYears !== undefined) elements.termYears.value = parsed.termYears;
-  if (parsed.monthlyOverpayment !== undefined) {
-    elements.monthlyOverpayment.value = parsed.monthlyOverpayment;
-  }
-}
-
-function parseScenario(text) {
-  const normalized = text.toLowerCase().replaceAll(",", "");
-  const parsed = {};
-  const rateMatch =
-    normalized.match(/(\d+(?:\.\d+)?)\s*%/) ??
-    normalized.match(/rate\D{0,12}(\d+(?:\.\d+)?)/);
-  const termMatch =
-    normalized.match(/(\d+)\s*(?:year|years|yr|yrs)/) ??
-    normalized.match(/term\D{0,12}(\d+)/);
-  const overpaymentMatch =
-    normalized.match(/(?:overpayment|overpay|extra)\D{0,16}(\d+(?:\.\d+)?)([km])?/) ??
-    normalized.match(/(\d+(?:\.\d+)?)([km])?\s*(?:overpayment|overpay|extra)/);
-  const loanMatch =
-    normalized.match(/(?:loan|mortgage|borrow|borrowing|amount|principal)\D{0,16}(\d+(?:\.\d+)?)([km])?/) ??
-    normalized.match(/(\d+(?:\.\d+)?)([km])?\s*(?:loan|mortgage|borrowed)/) ??
-    normalized.match(/^(\d+(?:\.\d+)?)([km])?/);
-
-  if (loanMatch) parsed.loanAmount = parseScaledNumber(loanMatch[1], loanMatch[2]);
-  if (rateMatch) parsed.annualInterestRatePercent = Number(rateMatch[1]);
-  if (termMatch) parsed.termYears = Number.parseInt(termMatch[1], 10);
-  if (overpaymentMatch) {
-    parsed.monthlyOverpayment = parseScaledNumber(
-      overpaymentMatch[1],
-      overpaymentMatch[2],
-    );
-  }
-
-  return parsed;
-}
-
-function parseScaledNumber(value, suffix) {
-  const numericValue = Number(value);
-  if (suffix === "k") return numericValue * 1_000;
-  if (suffix === "m") return numericValue * 1_000_000;
-  return numericValue;
-}
-
-function readMortgageInput() {
-  return {
-    loanAmount: Number(elements.loanAmount.value),
-    annualInterestRatePercent: Number(elements.interestRate.value),
-    termYears: Number.parseInt(elements.termYears.value, 10),
-    monthlyOverpayment: Number(elements.monthlyOverpayment.value || 0),
-  };
-}
-
-function validateMortgageInput(input) {
-  if (!Number.isFinite(input.loanAmount) || input.loanAmount <= 0) {
-    throw new Error("Loan amount must be greater than zero.");
-  }
-  if (
-    !Number.isFinite(input.annualInterestRatePercent) ||
-    input.annualInterestRatePercent < 0
-  ) {
-    throw new Error("Rate percent must be zero or greater.");
-  }
-  if (!Number.isInteger(input.termYears) || input.termYears <= 0) {
-    throw new Error("Term years must be a positive whole number.");
-  }
-  if (!Number.isFinite(input.monthlyOverpayment) || input.monthlyOverpayment < 0) {
-    throw new Error("Overpayment must be zero or greater.");
-  }
-}
-
 function renderResult(result, rawPayload = result) {
   const structured = result.structuredContent;
   elements.rawOutput.textContent = JSON.stringify(rawPayload, null, 2);
@@ -335,6 +256,17 @@ function renderResult(result, rawPayload = result) {
   if (!structured) {
     elements.resultMetrics.textContent = "No structured result returned";
     elements.resultMetrics.className = "metrics empty-state";
+    return;
+  }
+
+  if (Array.isArray(structured.products)) {
+    elements.resultMetrics.className = "metrics";
+    elements.resultMetrics.replaceChildren(
+      createMetric("Products", String(structured.products.length)),
+      createMetric("LTV", `${structured.loanToValuePercent}%`),
+      createMetric("Term", `${structured.termYears} years`),
+      createMetric("Deposit", formatCurrency(structured.depositAmount)),
+    );
     return;
   }
 
@@ -353,17 +285,112 @@ function renderResult(result, rawPayload = result) {
   }
 
   elements.resultMetrics.className = "metrics";
-  elements.resultMetrics.replaceChildren(
-    ...metrics.map(([label, value]) => {
-      const item = document.createElement("div");
-      const labelNode = document.createElement("span");
-      const valueNode = document.createElement("strong");
-      labelNode.textContent = label;
-      valueNode.textContent = value;
-      item.append(labelNode, valueNode);
-      return item;
-    }),
-  );
+  elements.resultMetrics.replaceChildren(...metrics.map(([label, value]) => createMetric(label, value)));
+}
+
+function createMetric(label, value) {
+  const item = document.createElement("div");
+  const labelNode = document.createElement("span");
+  const valueNode = document.createElement("strong");
+  labelNode.textContent = label;
+  valueNode.textContent = value;
+  item.append(labelNode, valueNode);
+  return item;
+}
+
+function appendProductResults(result) {
+  if (!result || !Array.isArray(result.products)) return;
+
+  const message = document.createElement("article");
+  message.className = "message assistant product-results";
+  const header = document.createElement("div");
+  header.className = "message-header";
+  const roleNode = document.createElement("span");
+  roleNode.className = "message-role";
+  roleNode.textContent = `Illustrative deals · ${result.loanToValuePercent}% LTV`;
+  header.append(roleNode, createHsbcResponseChip());
+
+  const cards = document.createElement("div");
+  cards.className = "product-cards";
+  for (const product of result.products) {
+    const card = document.createElement("section");
+    card.className = "product-card";
+    const title = document.createElement("h3");
+    title.textContent = product.name;
+    const highlights = document.createElement("div");
+    highlights.className = "product-highlights";
+    for (const [label, value] of [
+      ["Monthly payment", formatCurrency(product.monthlyPayment)],
+      [
+        product.rateType === "fixed"
+          ? `Fixed rate for ${product.initialPeriodYears} years`
+          : `Variable rate for ${product.initialPeriodYears} years`,
+        `${product.initialRatePercent.toFixed(2)}%`,
+      ],
+      ["Booking fee", formatCurrency(product.productFee)],
+      ["Annual Percentage Rate of Charge (APRC)", `${product.annualPercentageRatePercent.toFixed(2)}%`],
+      [
+        `Variable rate after ${product.initialPeriodYears} years`,
+        `${product.reversionRatePercent.toFixed(2)}%`,
+      ],
+    ]) {
+      highlights.append(createProductFact(label, value));
+    }
+    const ltv = document.createElement("div");
+    ltv.className = "product-ltv";
+    ltv.innerHTML = `<strong>${product.maximumLoanToValuePercent}%</strong><span>Max Loan to Value</span>`;
+    const features = document.createElement("div");
+    features.className = "product-features";
+    for (const feature of product.features) {
+      const featureNode = document.createElement("span");
+      featureNode.textContent = feature;
+      features.append(featureNode);
+    }
+    const actions = document.createElement("div");
+    actions.className = "product-actions";
+    const details = document.createElement("button");
+    details.type = "button";
+    details.className = "product-link-button";
+    details.textContent = "⌄  View details";
+    const glossary = document.createElement("span");
+    glossary.className = "product-glossary";
+    glossary.textContent = "↗  Mortgage terms glossary";
+    const isResidentialSwitch = result.mortgageNeed === "switch_residential";
+    const switchDeal = document.createElement(isResidentialSwitch ? "a" : "button");
+    switchDeal.className = "switch-deal-button";
+    switchDeal.textContent = "Switch your deal";
+    if (isResidentialSwitch) {
+      switchDeal.href = "https://www.hsbc.co.uk/mortgages/existing-customers/switch/";
+      switchDeal.target = "_blank";
+      switchDeal.rel = "noopener noreferrer";
+    } else {
+      switchDeal.type = "button";
+      switchDeal.addEventListener("click", () => {
+        switchDeal.textContent = "Deal selected";
+        switchDeal.disabled = true;
+      });
+    }
+    actions.append(details, glossary, switchDeal);
+    card.append(title, highlights, ltv, features, actions);
+    cards.append(card);
+  }
+
+  const disclaimer = document.createElement("p");
+  disclaimer.className = "product-disclaimer";
+  disclaimer.textContent = result.disclaimer;
+  message.append(header, cards, disclaimer);
+  elements.chatLog.append(message);
+  elements.chatLog.scrollTop = elements.chatLog.scrollHeight;
+}
+
+function createProductFact(label, value) {
+  const fact = document.createElement("div");
+  const valueNode = document.createElement("strong");
+  const labelNode = document.createElement("span");
+  valueNode.textContent = value;
+  labelNode.textContent = label;
+  fact.append(valueNode, labelNode);
+  return fact;
 }
 
 function appendUserMessage(text) {
@@ -429,10 +456,45 @@ function setComposerText(text) {
 
 function updateComposerState() {
   const chipIsPresent = Boolean(elements.messageInput.querySelector(".app-chip"));
-  if (!chipIsPresent) state.selectedApp = null;
+  if (!chipIsPresent) {
+    state.selectedApp = null;
+    state.selectedMortgageNeed = null;
+  }
 
   const isEmpty = !chipIsPresent && !getMessageText();
   elements.messageInput.classList.toggle("is-empty", isEmpty);
+}
+
+function cycleMessageHistory(direction) {
+  const history = state.messages
+    .filter((message) => message.role === "user")
+    .map((message) => message.content);
+
+  if (history.length === 0) return false;
+
+  if (state.historyIndex === null) {
+    state.historyDraft = getMessageText();
+    if (direction > 0) return false;
+    state.historyIndex = history.length - 1;
+  } else {
+    const nextIndex = state.historyIndex + direction;
+    if (nextIndex >= history.length) {
+      state.historyIndex = null;
+      setComposerText(state.historyDraft);
+      placeCaretAtEnd(elements.messageInput);
+      return true;
+    }
+    state.historyIndex = Math.max(0, nextIndex);
+  }
+
+  setComposerText(history[state.historyIndex]);
+  placeCaretAtEnd(elements.messageInput);
+  return true;
+}
+
+function resetHistoryNavigation() {
+  state.historyIndex = null;
+  state.historyDraft = "";
 }
 
 function placeCaretAtEnd(element) {
@@ -447,6 +509,64 @@ function placeCaretAtEnd(element) {
 
 function appendAssistantMessage(text, options) {
   appendMessage("assistant", text, options);
+}
+
+function appendThinkingIndicator() {
+  if (elements.chatLog.querySelector(".thinking-message")) return;
+
+  const message = document.createElement("article");
+  message.className = "message assistant thinking-message";
+  message.setAttribute("role", "status");
+  message.setAttribute("aria-label", "Assistant is thinking");
+
+  const text = document.createElement("span");
+  text.className = "thinking-text";
+  text.textContent = "Thinking";
+  message.append(text);
+  elements.chatLog.append(message);
+  elements.chatLog.scrollTop = elements.chatLog.scrollHeight;
+}
+
+function removeThinkingIndicator() {
+  elements.chatLog.querySelector(".thinking-message")?.remove();
+}
+
+function appendChatAction(action) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "chat-action";
+  const link = document.createElement("a");
+  link.className = "decision-link";
+  link.href = action.url;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.textContent = action.label;
+  wrapper.append(link);
+  elements.chatLog.append(wrapper);
+  elements.chatLog.scrollTop = elements.chatLog.scrollHeight;
+}
+
+function appendChatActions(actions) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "chat-actions";
+  for (const action of actions) {
+    if (action.kind !== "mortgage-need" || !action.id || !action.label) continue;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "mortgage-need-button";
+    button.textContent = action.label;
+    button.addEventListener("click", () => {
+      for (const sibling of wrapper.querySelectorAll("button")) sibling.disabled = true;
+      state.selectedMortgageNeed = action.id;
+      const text = `I want to ${action.label.toLowerCase()}.`;
+      appendUserMessage(text);
+      sendChatMessage(text).catch((error) => showError(error));
+    });
+    wrapper.append(button);
+  }
+  if (wrapper.childElementCount) {
+    elements.chatLog.append(wrapper);
+    elements.chatLog.scrollTop = elements.chatLog.scrollHeight;
+  }
 }
 
 function appendMessage(
@@ -519,6 +639,7 @@ function createHsbcResponseChip() {
 }
 
 function showError(error) {
+  removeThinkingIndicator();
   setBusy(false);
   setStatus(state.connected ? "connected" : "error", state.connected ? "Ready" : "Error");
   appendAssistantMessage(error instanceof Error ? error.message : String(error), {
@@ -528,7 +649,6 @@ function showError(error) {
 
 function setBusy(isBusy) {
   elements.connectButton.disabled = isBusy;
-  elements.calculateButton.disabled = isBusy;
   elements.chatForm.querySelector("button[type='submit']").disabled = isBusy;
 }
 
@@ -542,12 +662,4 @@ function formatCurrency(value) {
     style: "currency",
     currency: "GBP",
   }).format(value);
-}
-
-function formatScenarioText(input) {
-  const overpayment =
-    input.monthlyOverpayment > 0
-      ? ` with ${input.monthlyOverpayment} monthly overpayment`
-      : "";
-  return `${input.loanAmount} at ${input.annualInterestRatePercent}% for ${input.termYears} years${overpayment}`;
 }
