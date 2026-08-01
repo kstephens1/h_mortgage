@@ -11,6 +11,13 @@ import {
 } from "./mortgage.js";
 
 const MCP_PATH = "/mcp";
+const ALLOWED_ORIGINS = new Set(
+  (process.env.ALLOWED_ORIGINS ??
+    "http://127.0.0.1:5173,http://localhost:5173")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean),
+);
 
 const mortgageInputSchema = {
   loanAmount: z
@@ -322,7 +329,7 @@ export function startHttpServer(
     const url = new URL(req.url, `http://${req.headers.host ?? "localhost"}`);
 
     if (req.method === "OPTIONS" && url.pathname === MCP_PATH) {
-      writeCorsHeaders(res);
+      writeCorsHeaders(req.headers.origin, res);
       res.writeHead(204).end();
       return;
     }
@@ -336,7 +343,7 @@ export function startHttpServer(
 
     const mcpMethods = new Set(["POST", "GET", "DELETE"]);
     if (url.pathname === MCP_PATH && req.method && mcpMethods.has(req.method)) {
-      writeCorsHeaders(res);
+      writeCorsHeaders(req.headers.origin, res);
 
       const server = createMortgageServer();
       const transport = new StreamableHTTPServerTransport({
@@ -372,10 +379,16 @@ export function startHttpServer(
   });
 }
 
-function writeCorsHeaders(res: ServerResponse): void {
-  res.setHeader("Access-Control-Allow-Origin", "*");
+function writeCorsHeaders(origin: string | undefined, res: ServerResponse): void {
+  if (origin && ALLOWED_ORIGINS.has(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  }
+  res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, DELETE, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "content-type, mcp-session-id");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "authorization, content-type, mcp-protocol-version, mcp-session-id",
+  );
   res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id");
 }
 

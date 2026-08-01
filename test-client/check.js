@@ -2,7 +2,14 @@ import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-const files = ["src/app.js", "server.js", "dev.js"];
+const files = [
+  "src/app.js",
+  "server.js",
+  "auth.js",
+  "auth.check.js",
+  "server-auth.check.js",
+  "dev.js",
+];
 
 for (const file of files) {
   const result = spawnSync(process.execPath, ["--check", file], {
@@ -14,11 +21,21 @@ for (const file of files) {
   }
 }
 
+await import("./auth.check.js");
+
 const {
   extractRepaymentDetails,
   getActiveMortgageWorkflow,
   getActiveWorkflowMessages,
+  normalizeEndpoint,
 } = await import("./server.js");
+
+process.env.MCP_ENDPOINT_LOCKED = "true";
+assert.equal(
+  normalizeEndpoint("https://chat-h.35.211.52.83.nip.io/mcp"),
+  "http://127.0.0.1:8787/mcp",
+);
+delete process.env.MCP_ENDPOINT_LOCKED;
 
 const repaymentConversation = [
   { role: "user", content: "mortgage deals" },
@@ -55,6 +72,12 @@ assert.equal(
 );
 
 const styles = readFileSync(new URL("./src/styles.css", import.meta.url), "utf8");
+const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
+const app = readFileSync(new URL("./src/app.js", import.meta.url), "utf8");
+assert.match(html, /id="login-screen"/);
+assert.match(html, /id="app-shell" class="app-shell" hidden/);
+assert.match(app, /sessionStorage\.setItem/);
+assert.match(app, /authorization.*Bearer/);
 assert.match(styles, /body \{[^}]*height: 100dvh;[^}]*overflow: hidden;/);
 assert.match(styles, /\.side-panel \{[^}]*overflow-y: auto;/);
 assert.match(

@@ -7,7 +7,9 @@
     "dev": "node --env-file=.env dev.js",
     "dev:api": "node --env-file=.env server.js",
     "dev:ui": "vite --host 127.0.0.1 --port 5173",
-    "check": "node check.js"
+    "check": "node check.js",
+    "check:auth": "node server-auth.check.js",
+    "build": "vite build"
   },
   "dependencies": {
     "dompurify": "^3.4.12",

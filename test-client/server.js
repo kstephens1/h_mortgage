@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import { createSessionAuth, getBearerToken } from "./auth.js";
 
 const HOST = process.env.TEST_CLIENT_HOST ?? "127.0.0.1";
 const PORT = Number(process.env.TEST_CLIENT_API_PORT ?? 5174);
@@ -15,6 +16,21 @@ const ALLOWED_MCP_TOOLS = parseToolAllowlist(
   ["calculate_mortgage_repayment", "find_mortgage_product_rates", "get_customer_support"],
 );
 const MAX_TOOL_LOOPS = 4;
+const MAX_REQUEST_BYTES = parsePositiveInteger(
+  process.env.MAX_REQUEST_BYTES,
+  64 * 1024,
+  "MAX_REQUEST_BYTES",
+);
+const ALLOWED_ORIGINS = new Set(
+  (process.env.ALLOWED_ORIGINS ??
+    "http://127.0.0.1:5173,http://localhost:5173")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean),
+);
+let sessionAuth;
+const loginLimiter = createRateLimiter({ limit: 10, windowMs: 10 * 60 * 1000 });
+const chatLimiter = createRateLimiter({ limit: 30, windowMs: 60 * 1000 });
 const MORTGAGE_NEED_OPTIONS = [
   { id: "switch_residential", label: "Switch to a new residential deal" },
   { id: "first_time_buyer", label: "Buy my first home" },
@@ -28,9 +44,37 @@ const MORTGAGE_NEED_OPTIONS = [
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? HOST}`);
+    const origin = req.headers.origin;
 
     if (req.method === "OPTIONS") {
-      writeJson(res, 204, null);
+      writeJson(res, 204, null, origin);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/auth/login") {
+      if (!loginLimiter.take(getClientAddress(req))) {
+        writeJson(res, 429, { error: "Too many login attempts. Try again later." }, origin);
+        return;
+      }
+      const body = await readJson(req);
+      const auth = getSessionAuth();
+      if (!auth.verifyCredentials(body?.username, body?.password)) {
+        writeJson(res, 401, { error: "Invalid username or password." }, origin);
+        return;
+      }
+      writeJson(res, 200, auth.issueToken(), origin);
+      return;
+    }
+
+    const token = getBearerToken(req.headers.authorization);
+    const auth = getSessionAuth();
+    if (!auth.verifyToken(token)) {
+      writeJson(res, 401, { error: "Authentication required." }, origin);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/auth/verify") {
+      writeJson(res, 204, null, origin);
       return;
     }
 
@@ -41,25 +85,31 @@ const server = createServer(async (req, res) => {
         maxTokens: OPENROUTER_MAX_TOKENS,
         mcpEndpoint: DEFAULT_MCP_ENDPOINT,
         allowedTools: ALLOWED_MCP_TOOLS,
-      });
+      }, origin);
       return;
     }
 
     if (req.method === "POST" && url.pathname === "/chat") {
+      if (!chatLimiter.take(getClientAddress(req))) {
+        writeJson(res, 429, { error: "Too many chat requests. Try again shortly." }, origin);
+        return;
+      }
       const body = await readJson(req);
       const result = await runChat(body);
-      writeJson(res, 200, result);
+      writeJson(res, 200, result, origin);
       return;
     }
 
-    writeJson(res, 404, { error: "Not found" });
+    writeJson(res, 404, { error: "Not found" }, origin);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    writeJson(res, 500, { error: message });
+    const statusCode = error instanceof HttpError ? error.statusCode : 500;
+    writeJson(res, statusCode, { error: message }, req.headers.origin);
   }
 });
 
 if (import.meta.url === `file://${process.argv[1]}`) {
+  getSessionAuth();
   server.listen(PORT, HOST, () => {
     console.log(
       `ChatHSBC orchestrator listening on http://${HOST}:${PORT} using ${OPENROUTER_MODEL}`,
@@ -633,7 +683,11 @@ function normalizeMessages(messages) {
   });
 }
 
-function normalizeEndpoint(value) {
+export function normalizeEndpoint(value) {
+  if (process.env.MCP_ENDPOINT_LOCKED === "true") {
+    return new URL(DEFAULT_MCP_ENDPOINT).toString();
+  }
+
   const endpoint = String(value || DEFAULT_MCP_ENDPOINT).trim();
   const url = new URL(endpoint);
 
@@ -665,21 +719,36 @@ function parseToolAllowlist(value, fallback) {
 
 async function readJson(req) {
   const chunks = [];
+  let totalBytes = 0;
   for await (const chunk of req) {
+    totalBytes += chunk.length;
+    if (totalBytes > MAX_REQUEST_BYTES) {
+      throw new HttpError(413, "Request body is too large.");
+    }
     chunks.push(chunk);
   }
 
   const raw = Buffer.concat(chunks).toString("utf8");
-  return raw ? JSON.parse(raw) : {};
+  try {
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    throw new HttpError(400, "Request body must be valid JSON.");
+  }
 }
 
-function writeJson(res, statusCode, value) {
-  res.writeHead(statusCode, {
-    "access-control-allow-origin": "*",
+function writeJson(res, statusCode, value, origin) {
+  const headers = {
     "access-control-allow-methods": "GET, POST, OPTIONS",
-    "access-control-allow-headers": "content-type",
+    "access-control-allow-headers": "authorization, content-type, mcp-protocol-version, mcp-session-id",
+    "access-control-expose-headers": "mcp-session-id",
+    "cache-control": "no-store",
     "content-type": "application/json",
-  });
+    "vary": "Origin",
+  };
+  if (origin && ALLOWED_ORIGINS.has(origin)) {
+    headers["access-control-allow-origin"] = origin;
+  }
+  res.writeHead(statusCode, headers);
 
   if (statusCode === 204) {
     res.end();
@@ -691,4 +760,44 @@ function writeJson(res, statusCode, value) {
 
 function getOpenRouterToken() {
   return process.env.OPENROUTER_API_KEY ?? "";
+}
+
+function getSessionAuth() {
+  sessionAuth ??= createSessionAuth({
+    username: process.env.AUTH_USERNAME,
+    passwordSalt: process.env.AUTH_PASSWORD_SALT,
+    passwordHash: process.env.AUTH_PASSWORD_HASH,
+    sessionSecret: process.env.AUTH_SESSION_SECRET,
+  });
+  return sessionAuth;
+}
+
+function getClientAddress(req) {
+  const forwarded = String(req.headers["x-forwarded-for"] ?? "")
+    .split(",")[0]
+    .trim();
+  return forwarded || req.socket.remoteAddress || "unknown";
+}
+
+function createRateLimiter({ limit, windowMs }) {
+  const entries = new Map();
+  return {
+    take(key) {
+      const currentTime = Date.now();
+      const existing = entries.get(key);
+      if (!existing || existing.resetAt <= currentTime) {
+        entries.set(key, { count: 1, resetAt: currentTime + windowMs });
+        return true;
+      }
+      existing.count += 1;
+      return existing.count <= limit;
+    },
+  };
+}
+
+class HttpError extends Error {
+  constructor(statusCode, message) {
+    super(message);
+    this.statusCode = statusCode;
+  }
 }

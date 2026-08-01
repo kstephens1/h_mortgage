@@ -5,8 +5,17 @@ const MCP_PROTOCOL_VERSION = "2025-06-18";
 const TOOL_NAME = "calculate_mortgage_repayment";
 const PRODUCT_TOOL_NAME = "find_mortgage_product_rates";
 const HSBC_LOGO_URL = new URL("../assets/hsbc-logo.png", import.meta.url).href;
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
+const DEFAULT_MCP_ENDPOINT =
+  import.meta.env.VITE_MCP_ENDPOINT ?? "http://127.0.0.1:8787/mcp";
+const SESSION_STORAGE_KEY = "chat-h-session";
 
 const elements = {
+  loginScreen: document.querySelector("#login-screen"),
+  loginForm: document.querySelector("#login-form"),
+  loginError: document.querySelector("#login-error"),
+  appShell: document.querySelector("#app-shell"),
+  logoutButton: document.querySelector("#logout-button"),
   endpoint: document.querySelector("#endpoint"),
   connectButton: document.querySelector("#connect-button"),
   statusPill: document.querySelector("#status-pill"),
@@ -32,12 +41,24 @@ const state = {
   selectedMortgageNeed: null,
   historyIndex: null,
   historyDraft: "",
+  token: null,
 };
 
+elements.endpoint.value = DEFAULT_MCP_ENDPOINT;
 elements.toolName.textContent = TOOL_NAME;
 appendAssistantMessage(
   "Hi! How can I help? Type @ to add HSBC Mortgages when you want mortgage-specific assistance.",
 );
+
+elements.loginForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  login().catch((error) => showLoginError(error));
+});
+
+elements.logoutButton.addEventListener("click", () => {
+  clearSession();
+  showLoginScreen();
+});
 
 elements.connectButton.addEventListener("click", () => {
   connectToServer().catch((error) => showError(error));
@@ -114,7 +135,7 @@ async function sendChatMessage(text) {
   setStatus("running", "Thinking");
   appendThinkingIndicator();
 
-  const response = await fetch("/chat", {
+  const response = await authenticatedFetch(apiUrl("/chat"), {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -195,7 +216,7 @@ async function connectToServer() {
 }
 
 async function mcpRequest(method, params) {
-  const response = await fetch(elements.endpoint.value.trim(), {
+  const response = await authenticatedFetch(elements.endpoint.value.trim(), {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -647,6 +668,99 @@ function showError(error) {
   });
 }
 
+async function login() {
+  const submitButton = elements.loginForm.querySelector("button[type='submit']");
+  submitButton.disabled = true;
+  elements.loginError.hidden = true;
+  const data = new FormData(elements.loginForm);
+
+  try {
+    const response = await fetch(apiUrl("/auth/login"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        username: data.get("username"),
+        password: data.get("password"),
+      }),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(body.error ?? "Sign in failed.");
+    }
+    state.token = body.token;
+    sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({
+      token: body.token,
+      expiresAt: body.expiresAt,
+    }));
+    elements.loginForm.reset();
+    showApp();
+  } finally {
+    submitButton.disabled = false;
+  }
+}
+
+async function restoreSession() {
+  const stored = sessionStorage.getItem(SESSION_STORAGE_KEY);
+  if (!stored) {
+    showLoginScreen();
+    return;
+  }
+
+  try {
+    const session = JSON.parse(stored);
+    if (!session.token || Date.parse(session.expiresAt) <= Date.now()) {
+      throw new Error("Session expired");
+    }
+    state.token = session.token;
+    const response = await authenticatedFetch(apiUrl("/health"));
+    if (!response.ok) throw new Error("Session expired");
+    showApp();
+  } catch {
+    clearSession();
+    showLoginScreen();
+  }
+}
+
+async function authenticatedFetch(url, options = {}) {
+  if (!state.token) {
+    throw new Error("Authentication required.");
+  }
+  const headers = new Headers(options.headers);
+  headers.set("authorization", `Bearer ${state.token}`);
+  const response = await fetch(url, { ...options, headers });
+  if (response.status === 401) {
+    clearSession();
+    showLoginScreen();
+    throw new Error("Your session has expired. Please sign in again.");
+  }
+  return response;
+}
+
+function apiUrl(path) {
+  return `${API_BASE_URL}${path}`;
+}
+
+function showLoginError(error) {
+  elements.loginError.textContent = error instanceof Error ? error.message : String(error);
+  elements.loginError.hidden = false;
+}
+
+function clearSession() {
+  state.token = null;
+  sessionStorage.removeItem(SESSION_STORAGE_KEY);
+}
+
+function showLoginScreen() {
+  elements.appShell.hidden = true;
+  elements.loginScreen.hidden = false;
+  elements.loginForm.querySelector("#username").focus();
+}
+
+function showApp() {
+  elements.loginScreen.hidden = true;
+  elements.appShell.hidden = false;
+}
+
 function setBusy(isBusy) {
   elements.connectButton.disabled = isBusy;
   elements.chatForm.querySelector("button[type='submit']").disabled = isBusy;
@@ -663,3 +777,5 @@ function formatCurrency(value) {
     currency: "GBP",
   }).format(value);
 }
+
+restoreSession();

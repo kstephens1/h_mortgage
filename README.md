@@ -63,6 +63,18 @@ Before starting it, create `test-client/.env` if it does not already exist:
 OPENROUTER_API_KEY=your_api_key
 ```
 
+The protected local UI also needs hashed login credentials. Generate them
+without writing the password itself to `.env`:
+
+```bash
+read -s CHAT_H_LOCAL_PASSWORD
+CHAT_H_PASSWORD="$CHAT_H_LOCAL_PASSWORD" node scripts/create-auth-values.mjs >> test-client/.env
+unset CHAT_H_LOCAL_PASSWORD
+```
+
+The generated username defaults to `hsbc`. Sign in with that username and the
+password entered at the prompt.
+
 Open [http://127.0.0.1:5173/](http://127.0.0.1:5173/). The default MCP
 endpoint is `http://127.0.0.1:8787/mcp`. You can use both the chat composer
 and the MCP **Connect** control.
@@ -151,3 +163,80 @@ npx @modelcontextprotocol/inspector@latest --server-url http://localhost:8787/mc
 ```
 
 The calculation is an estimate for illustration only and is not financial advice.
+
+## Private production deployment
+
+The production deployment is isolated from the other applications on the
+existing VM:
+
+- UI: `https://chat-h-prod-ks-2026.web.app`
+- protected API and MCP: `https://chat-h.35.211.52.83.nip.io`
+- loopback services: `chat-h-mcp` on `127.0.0.1:8787` and `chat-h-web` on
+  `127.0.0.1:5174`
+- releases: `/opt/chat-h/releases/<release-id>` with `/opt/chat-h/current`
+- secrets: `/etc/chat-h/app.env`, root-owned with mode `0600`
+
+The public Firebase files contain only the login shell and application code.
+The password is verified by the VM using a salted scrypt hash. A successful
+login stores a signed 12-hour bearer token in the current tab's
+`sessionStorage`; the password is never persisted. `/health`, `/chat`, and
+`/mcp` all require that token.
+
+### First deployment
+
+The exact Firebase project must exist and be visible in
+`firebase projects:list`. Create only this project ID; if it is unavailable,
+stop rather than substituting another ID:
+
+```bash
+firebase projects:create chat-h-prod-ks-2026 --display-name "Chat-H Prod"
+```
+
+Record the existing applications' baseline, then deploy:
+
+```bash
+./scripts/preflight-existing.sh
+
+export OPENROUTER_API_KEY='...'
+export CHAT_H_USERNAME='hsbc'
+export CHAT_H_PASSWORD='...'
+./scripts/deploy-prod.sh
+```
+
+The deploy script runs all 14 MCP tests, typechecking, both builds, client
+checks, and the authentication integration check. It then uploads a versioned
+release, creates the dedicated system user and services, obtains the isolated
+Let’s Encrypt certificate if needed, validates Nginx before reload, deploys
+Firebase with the explicit `--project chat-h-prod-ks-2026` argument, and runs
+the production smoke suite. It does not address another Firebase project or
+restart an existing application service.
+
+Run the smoke suite again at any time:
+
+```bash
+CHAT_H_USERNAME='hsbc' CHAT_H_PASSWORD='...' ./scripts/smoke-prod.sh
+```
+
+After deployment, repeat `./scripts/preflight-existing.sh` and compare its
+service/listener output with the recorded baseline.
+
+### Rollback
+
+To switch only the VM services back to the previously deployed Chat-H release:
+
+```bash
+./scripts/rollback-prod.sh
+```
+
+Firebase Hosting has an independent release history. If its UI also needs to
+be reverted, use the rollback action for the
+`chat-h-prod-ks-2026` site in the Firebase Hosting console. Do not roll back
+or redeploy WealthTrack, Pension Dashboard, or Stock Picker.
+
+To disable Chat-H without touching another app:
+
+```bash
+gcloud compute ssh clawdbot-vm \
+  --project clawdbot-ks-2026 --zone us-east1-b \
+  --command 'sudo systemctl disable --now chat-h-mcp chat-h-web'
+```

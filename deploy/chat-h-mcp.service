@@ -1,0 +1,23 @@
+[Unit]
+Description=Chat-H mortgage MCP service
+After=network.target
+
+[Service]
+Type=simple
+User=chat-h
+Group=chat-h
+WorkingDirectory=/opt/chat-h/current
+EnvironmentFile=/etc/chat-h/app.env
+Environment=HOST=127.0.0.1
+Environment=PORT=8787
+ExecStart=/opt/chat-h/runtime/node/bin/node dist/server.js
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/chat-h
+
+[Install]
+WantedBy=multi-user.target

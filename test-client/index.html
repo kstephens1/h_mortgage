@@ -7,7 +7,24 @@
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
-    <main class="app-shell">
+    <main id="login-screen" class="login-screen">
+      <section class="login-card" aria-labelledby="login-title">
+        <img src="/assets/hsbc-logo.png" alt="" />
+        <p class="login-eyebrow">Private access</p>
+        <h1 id="login-title">Sign in to Chat‑H</h1>
+        <p class="login-copy">Enter your authorised credentials to continue.</p>
+        <form id="login-form">
+          <label for="username">Username</label>
+          <input id="username" name="username" autocomplete="username" required />
+          <label for="password">Password</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" required />
+          <p id="login-error" class="login-error" role="alert" hidden></p>
+          <button type="submit">Sign in</button>
+        </form>
+      </section>
+    </main>
+
+    <main id="app-shell" class="app-shell" hidden>
       <nav class="navigation-rail" aria-label="Primary navigation">
         <a class="brand-mark" href="/" aria-label="ChatHSBC home">
           <img src="/assets/chatgpt-logo.png" alt="" />
@@ -25,6 +42,7 @@
             <label for="endpoint">Endpoint</label>
             <input id="endpoint" name="endpoint" type="url" value="http://127.0.0.1:8787/mcp" />
             <button id="connect-button" type="button">Connect</button>
+            <button id="logout-button" class="logout-button" type="button">Log out</button>
           </div>
         </header>
 

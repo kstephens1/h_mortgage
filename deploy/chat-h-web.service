@@ -1,0 +1,25 @@
+[Unit]
+Description=Chat-H protected web API
+After=network.target chat-h-mcp.service
+Requires=chat-h-mcp.service
+
+[Service]
+Type=simple
+User=chat-h
+Group=chat-h
+WorkingDirectory=/opt/chat-h/current/web
+EnvironmentFile=/etc/chat-h/app.env
+Environment=TEST_CLIENT_HOST=127.0.0.1
+Environment=TEST_CLIENT_API_PORT=5174
+Environment=MCP_ENDPOINT=http://127.0.0.1:8787/mcp
+ExecStart=/opt/chat-h/runtime/node/bin/node server.js
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/chat-h
+
+[Install]
+WantedBy=multi-user.target

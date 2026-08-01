@@ -32,6 +32,18 @@ Create `test-client/.env` if it does not already exist:
 OPENROUTER_API_KEY=your_api_key
 ```
 
+From the repository root, generate salted local login values and append them
+to that file:
+
+```bash
+read -s CHAT_H_LOCAL_PASSWORD
+CHAT_H_PASSWORD="$CHAT_H_LOCAL_PASSWORD" node scripts/create-auth-values.mjs >> test-client/.env
+unset CHAT_H_LOCAL_PASSWORD
+```
+
+The generated username defaults to `hsbc`. The password itself is not written
+to `.env`.
+
 In a second terminal, start the UI and local chat orchestrator together:
 
 ```bash
@@ -61,6 +73,10 @@ OPENROUTER_MAX_TOKENS=2048
 MCP_ENDPOINT=http://127.0.0.1:8787/mcp
 MCP_ALLOWED_TOOLS=calculate_mortgage_repayment,find_mortgage_product_rates,get_customer_support
 TEST_CLIENT_API_PORT=5174
+AUTH_USERNAME=hsbc
+AUTH_PASSWORD_SALT=generated_hex_value
+AUTH_PASSWORD_HASH=generated_hex_value
+AUTH_SESSION_SECRET=generated_hex_value
 ```
 
 `OPENROUTER_MAX_TOKENS` is the preferred completion ceiling. If OpenRouter
